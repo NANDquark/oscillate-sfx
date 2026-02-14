@@ -4,11 +4,13 @@ import "base:intrinsics"
 import "base:runtime"
 import hm "core:container/handle_map"
 import "core:log"
+import "core:math/linalg"
 import "core:strings"
 import ma "vendor:miniaudio"
 
 Audio :: struct {
 	allocator:                     runtime.Allocator,
+	min_distance, max_distance:    f32,
 	resource_manager:              ma.resource_manager,
 	engine:                        ma.engine,
 	ctx:                           ma.context_type,
@@ -16,10 +18,13 @@ Audio :: struct {
 	selected_playback_device_info: ma.device_info,
 	selected_playback_device:      ma.device,
 	sounds:                        hm.Static_Handle_Map(MAX_SOUNDS, Sound, Sound_Handle),
+	listener_idx:                  int,
+	listener_position:             [2]f32,
 }
 
 Sound :: struct {
 	handle:     hm.Handle32,
+	position:   [2]f32,
 	ma_sound:   ma.sound,
 	ma_decoder: ma.decoder,
 }
@@ -36,10 +41,18 @@ Error :: union #shared_nil {
 	},
 }
 
-init :: proc(audio: ^Audio, sample_rate: uint = 48_000, allocator := context.allocator) -> Error {
+init :: proc(
+	audio: ^Audio,
+	min_distance: f32, // min distance where sounds are full volume
+	max_distance: f32, // max distance beyond which sounds cannot be heard
+	sample_rate: uint = 48_000,
+	allocator := context.allocator,
+) -> Error {
 	context.allocator = allocator
 	audio^ = {}
 	audio.allocator = allocator
+	audio.min_distance = min_distance
+	audio.max_distance = max_distance
 
 	succeeded := false
 	defer if !succeeded {
@@ -113,6 +126,12 @@ init :: proc(audio: ^Audio, sample_rate: uint = 48_000, allocator := context.all
 		return .Init_Failed
 	}
 
+	audio.listener_idx = 0
+	audio.listener_position = {0, 0}
+	listener_idx := u32(audio.listener_idx)
+	ma.engine_listener_set_enabled(&audio.engine, listener_idx, b32(true))
+	ma.engine_listener_set_position(&audio.engine, listener_idx, 0, 0, 0)
+
 	result = ma.engine_start(&audio.engine)
 	if result != .SUCCESS {
 		log.errorf("failed to start audio engine, err=%v", result)
@@ -157,6 +176,24 @@ set_volume :: proc(audio: ^Audio, volume: f32) {
 	}
 }
 
+@(private)
+// Miniaudio uses +X is right and +Y is up so convert to use -Y to align with
+_convert_position :: proc(position: [2]f32) -> [2]f32 {
+	return {position.x, -position.y}
+}
+
+set_listener_position :: proc(audio: ^Audio, position: [2]f32) {
+	position := _convert_position(position)
+	audio.listener_position = position
+	ma.engine_listener_set_position(
+		&audio.engine,
+		u32(audio.listener_idx),
+		position.x,
+		position.y,
+		0,
+	)
+}
+
 sound_load :: proc {
 	sound_load_from_bytes,
 	sound_load_from_file,
@@ -185,6 +222,8 @@ sound_load_from_file :: proc(audio: ^Audio, filepath: string) -> (Sound_Handle, 
 		log.errorf("failed to load sound, err=%v", result)
 		return {}, .Sound_Load_Failed
 	}
+
+	_sound_init_spatializer(audio, new_sound)
 
 	return handle, nil
 }
@@ -229,7 +268,19 @@ sound_load_from_bytes :: proc(audio: ^Audio, bytes: []u8) -> (Sound_Handle, Erro
 		return {}, .Sound_Load_Failed
 	}
 
+	_sound_init_spatializer(audio, new_sound)
+
 	return handle, nil
+}
+
+@(private)
+_sound_init_spatializer :: proc(audio: ^Audio, sound: ^Sound) {
+	ma.sound_set_spatialization_enabled(&sound.ma_sound, b32(true))
+	ma.sound_set_positioning(&sound.ma_sound, .absolute)
+	ma.sound_set_attenuation_model(&sound.ma_sound, .inverse)
+	ma.sound_set_min_distance(&sound.ma_sound, audio.min_distance)
+	ma.sound_set_max_distance(&sound.ma_sound, audio.max_distance)
+	ma.sound_set_pinned_listener_index(&sound.ma_sound, u32(audio.listener_idx))
 }
 
 @(private)
@@ -255,9 +306,18 @@ sound_unload :: proc(audio: ^Audio, handle: Sound_Handle) {
 	hm.remove(&audio.sounds, handle)
 }
 
-sound_start :: proc(audio: ^Audio, handle: Sound_Handle, volume: f32 = 1, looping := false) {
+sound_start :: proc(
+	audio: ^Audio,
+	handle: Sound_Handle,
+	volume: f32 = 1,
+	looping := false,
+	position: [2]f32 = {0, 0},
+) {
+	position := _convert_position(position)
 	sound, ok := _sound_get(audio, handle)
 	if !ok do return
+	sound.position = position
+	ma.sound_set_position(&sound.ma_sound, position.x, position.y, 0)
 	ma.sound_set_volume(&sound.ma_sound, volume)
 	ma.sound_set_looping(&sound.ma_sound, b32(looping))
 
@@ -267,12 +327,6 @@ sound_start :: proc(audio: ^Audio, handle: Sound_Handle, volume: f32 = 1, loopin
 	}
 }
 
-sound_set_looping :: proc(audio: ^Audio, handle: Sound_Handle, looping: bool) {
-	sound, ok := _sound_get(audio, handle)
-	if !ok do return
-	ma.sound_set_looping(&sound.ma_sound, b32(looping))
-}
-
 sound_stop :: proc(audio: ^Audio, handle: Sound_Handle) {
 	sound, ok := _sound_get(audio, handle)
 	if !ok do return
@@ -280,6 +334,12 @@ sound_stop :: proc(audio: ^Audio, handle: Sound_Handle) {
 	if result != .SUCCESS {
 		log.warnf("failed to stop sound, handle=%v, err=%v", handle, result)
 	}
+}
+
+sound_set_looping :: proc(audio: ^Audio, handle: Sound_Handle, looping: bool) {
+	sound, ok := _sound_get(audio, handle)
+	if !ok do return
+	ma.sound_set_looping(&sound.ma_sound, b32(looping))
 }
 
 sound_set_volume :: proc(audio: ^Audio, handle: Sound_Handle, volume: f32) {
@@ -292,6 +352,13 @@ sound_get_volume :: proc(audio: ^Audio, handle: Sound_Handle) -> f32 {
 	sound, ok := _sound_get(audio, handle)
 	if !ok do return 0
 	return ma.sound_get_volume(&sound.ma_sound)
+}
+
+sound_set_position :: proc(audio: ^Audio, handle: Sound_Handle, position: [2]f32) {
+	position := _convert_position(position)
+	sound, ok := _sound_get(audio, handle)
+	if !ok do return
+	ma.sound_set_position(&sound.ma_sound, position.x, position.y, 0)
 }
 
 sound_is_playing :: proc(audio: ^Audio, handle: Sound_Handle) -> bool {
