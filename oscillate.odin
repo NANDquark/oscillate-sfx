@@ -24,7 +24,6 @@ Audio :: struct {
 
 Sound :: struct {
 	handle:     hm.Handle32,
-	position:   [2]f32,
 	ma_sound:   ma.sound,
 	ma_decoder: ma.decoder,
 }
@@ -36,6 +35,7 @@ MAX_SOUNDS :: 512
 Error :: union #shared_nil {
 	enum {
 		Init_Failed,
+		Invalid_Init_Parameters,
 		Sound_Load_Failed,
 		Max_Sounds_Reached,
 	},
@@ -49,6 +49,12 @@ init :: proc(
 	allocator := context.allocator,
 ) -> Error {
 	context.allocator = allocator
+
+	if min_distance < 0 || min_distance > max_distance {
+		log.error("min_distance must be > 0 and less than max_distance")
+		return .Invalid_Init_Parameters
+	}
+
 	audio^ = {}
 	audio.allocator = allocator
 	audio.min_distance = min_distance
@@ -177,7 +183,7 @@ set_volume :: proc(audio: ^Audio, volume: f32) {
 }
 
 @(private)
-// Miniaudio uses +X is right and +Y is up so convert to use -Y to align with
+// Miniaudio uses +X is right and +Y is up so convert to use -Y
 _convert_position :: proc(position: [2]f32) -> [2]f32 {
 	return {position.x, -position.y}
 }
@@ -251,6 +257,7 @@ sound_load_from_bytes :: proc(audio: ^Audio, bytes: []u8) -> (Sound_Handle, Erro
 	)
 	if result != .SUCCESS {
 		log.errorf("failed to load sound from bytes, err=%v", result)
+		hm.remove(&audio.sounds, handle)
 		return {}, .Sound_Load_Failed
 	}
 
@@ -309,14 +316,13 @@ sound_unload :: proc(audio: ^Audio, handle: Sound_Handle) {
 sound_start :: proc(
 	audio: ^Audio,
 	handle: Sound_Handle,
+	position: [2]f32,
 	volume: f32 = 1,
 	looping := false,
-	position: [2]f32 = {0, 0},
 ) {
 	position := _convert_position(position)
 	sound, ok := _sound_get(audio, handle)
 	if !ok do return
-	sound.position = position
 	ma.sound_set_position(&sound.ma_sound, position.x, position.y, 0)
 	ma.sound_set_volume(&sound.ma_sound, volume)
 	ma.sound_set_looping(&sound.ma_sound, b32(looping))
