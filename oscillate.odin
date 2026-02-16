@@ -150,6 +150,8 @@ init :: proc(
 }
 
 destroy :: proc(audio: ^Audio) {
+	if audio == nil do return
+
 	context.allocator = audio.allocator
 
 	sounds_iterator := hm.static_iterator_make(&audio.sounds)
