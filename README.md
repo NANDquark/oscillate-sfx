@@ -6,4 +6,4 @@ A very simple audio wrapper around miniaudio
 
 This package currently depends on "vendor:miniaudio" which has a C dependency. It must be compiled first before odin can build. 
 
-`make -C "$(odin root)/vendor/miniaudio/src"`
+`build.sh` or `build.ps1` to build dependencies.
