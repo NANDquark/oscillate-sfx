@@ -155,9 +155,7 @@ destroy :: proc(audio: ^Audio) {
 	context.allocator = audio.allocator
 
 	sounds_iterator := hm.static_iterator_make(&audio.sounds)
-	for {
-		sound, _, ok := hm.static_iterate(&sounds_iterator)
-		if !ok do break
+	for sound, _ in hm.static_iterate(&sounds_iterator) {
 		_sound_destroy(sound)
 	}
 	ma.engine_uninit(&audio.engine)
